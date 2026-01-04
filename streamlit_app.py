@@ -1,18 +1,28 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+import hashlib
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, Date, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from fpdf import FPDF
 import io
 
 # Configuração da Página
-st.set_page_config(page_title="CAPS Infantil - Checklist", layout="wide")
+st.set_page_config(page_title="CAPS Infantil - Sistema Completo", layout="wide")
 
 # Configuração do Banco de Dados
 Base = declarative_base()
 engine = create_engine('sqlite:///caps_data.db')
 Session = sessionmaker(bind=engine)
+
+# --- MODELOS DO BANCO DE DADOS ---
+
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    username = Column(String, unique=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    role = Column(String, default="user") # user, admin
 
 class Avaliacao(Base):
     __tablename__ = 'avaliacoes'
@@ -25,10 +35,10 @@ class Avaliacao(Base):
     profissional_responsavel = Column(String)
     
     # Acolhimento Inicial
-    paciente_nome = Column(String) # Adicionado para identificação
+    paciente_nome = Column(String)
     crianca_identificada = Column(Boolean)
     responsavel_presente = Column(Boolean)
-    responsavel_nome = Column(String) # Adicionado para detalhe
+    responsavel_nome = Column(String)
     motivo_atendimento = Column(Text)
     encaminhamento_origem = Column(String)
     observacao_comportamento = Column(Text)
@@ -56,7 +66,7 @@ class Avaliacao(Base):
     dor_relatada = Column(Boolean)
     orientacao_higiene_bucal = Column(Boolean)
     encaminhamento_odontologico = Column(Boolean)
-    classificacao_odonto = Column(String) # Rotina / Urgência
+    classificacao_odonto = Column(String)
     
     # Plano Inicial
     inserido_caps = Column(Boolean)
@@ -67,35 +77,140 @@ class Avaliacao(Base):
     proxima_avaliacao = Column(Date)
     registro_prontuario = Column(Boolean)
 
-# Criar tabelas se não existirem
+# Criar tabelas
 Base.metadata.create_all(engine)
 
-def save_avaliacao(data):
+# --- FUNÇÕES UTILITÁRIAS ---
+
+def make_hash(password):
+    return hashlib.sha256(str.encode(password)).hexdigest()
+
+def check_hash(password, hash_val):
+    return make_hash(password) == hash_val
+
+def init_db():
     session = Session()
-    nova_avaliacao = Avaliacao(**data)
-    session.add(nova_avaliacao)
-    session.commit()
+    # Criar admin padrão se não existir
+    admin = session.query(User).filter_by(username='admin').first()
+    if not admin:
+        admin_user = User(username='admin', password_hash=make_hash('admin'), role='admin')
+        session.add(admin_user)
+        session.commit()
     session.close()
+
+# Inicializa DB e usuário admin
+init_db()
+
+def login_user(username, password):
+    session = Session()
+    user = session.query(User).filter_by(username=username).first()
+    session.close()
+    if user and check_hash(password, user.password_hash):
+        return user
+    return None
+
+def save_avaliacao(data, avaliacao_id=None):
+    session = Session()
+    try:
+        if avaliacao_id:
+            # Atualizar existente
+            avaliacao = session.query(Avaliacao).filter_by(id=avaliacao_id).first()
+            if avaliacao:
+                for key, value in data.items():
+                    setattr(avaliacao, key, value)
+        else:
+            # Criar nova
+            nova_avaliacao = Avaliacao(**data)
+            session.add(nova_avaliacao)
+        session.commit()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar: {e}")
+        return False
+    finally:
+        session.close()
+
+def delete_avaliacao(avaliacao_id):
+    session = Session()
+    try:
+        avaliacao = session.query(Avaliacao).filter_by(id=avaliacao_id).first()
+        if avaliacao:
+            session.delete(avaliacao)
+            session.commit()
+            return True
+        return False
+    except Exception as e:
+        st.error(f"Erro ao excluir: {e}")
+        return False
+    finally:
+        session.close()
+
+def delete_user(user_id):
+    session = Session()
+    try:
+        user = session.query(User).filter_by(id=user_id).first()
+        if user:
+            session.delete(user)
+            session.commit()
+            return True
+        return False
+    finally:
+        session.close()
+
+def create_user(username, password, role):
+    session = Session()
+    try:
+        existing = session.query(User).filter_by(username=username).first()
+        if existing:
+            return False, "Usuário já existe"
+        
+        new_user = User(username=username, password_hash=make_hash(password), role=role)
+        session.add(new_user)
+        session.commit()
+        return True, "Usuário criado com sucesso"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        session.close()
+
+def update_user(user_id, new_password=None, new_role=None, new_username=None):
+    session = Session()
+    try:
+        user = session.query(User).filter_by(id=user_id).first()
+        if user:
+            if new_username and new_username != user.username:
+                existing = session.query(User).filter_by(username=new_username).first()
+                if existing:
+                    return False, "Nome de usuário já existe"
+                user.username = new_username
+            if new_password:
+                user.password_hash = make_hash(new_password)
+            if new_role:
+                user.role = new_role
+            session.commit()
+            return True, "Usuário atualizado com sucesso"
+        return False, "Usuário não encontrado"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        session.close()
 
 def gerar_pdf(dados):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
     
-    # Título
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(200, 10, txt="CHECKLIST RÁPIDO – AVALIAÇÃO INICIAL", ln=True, align='C')
     pdf.cell(200, 10, txt="CAPS INFANTIL", ln=True, align='C')
     pdf.ln(5)
     
-    # Função auxiliar para checkbox
     def checkbox(label, value):
         mark = "X" if value else " "
         pdf.set_font("Arial", size=10)
         pdf.cell(10, 5, txt=f"[{mark}]", ln=0)
         pdf.cell(0, 5, txt=label, ln=1)
 
-    # Acolhimento Inicial
     pdf.set_font("Arial", 'B', 11)
     pdf.cell(0, 8, txt="ACOLHIMENTO INICIAL", ln=1, fill=False)
     checkbox(f"Criança/adolescente identificado: {dados.paciente_nome or ''}", dados.crianca_identificada)
@@ -106,7 +221,6 @@ def gerar_pdf(dados):
     checkbox(f"Profissional responsável: {dados.profissional_responsavel or ''}", bool(dados.profissional_responsavel))
     pdf.ln(3)
 
-    # Caderneta Vacinal
     pdf.set_font("Arial", 'B', 11)
     pdf.cell(0, 8, txt="CADERNETA VACINAL", ln=1)
     checkbox("Caderneta apresentada", dados.caderneta_apresentada)
@@ -117,7 +231,6 @@ def gerar_pdf(dados):
     checkbox("Encaminhamento à UBS (se necessário)", dados.encaminhamento_ubs_vacina)
     pdf.ln(3)
 
-    # Avaliação Nutricional
     pdf.set_font("Arial", 'B', 11)
     pdf.cell(0, 8, txt="AVALIAÇÃO NUTRICIONAL", ln=1)
     checkbox(f"Peso aferido: {dados.peso} kg", True)
@@ -129,7 +242,6 @@ def gerar_pdf(dados):
     checkbox("Encaminhamento realizado (se necessário)", dados.encaminhamento_nutricao)
     pdf.ln(3)
 
-    # Avaliação Odontológica
     pdf.set_font("Arial", 'B', 11)
     pdf.cell(0, 8, txt="AVALIAÇÃO ODONTOLÓGICA", ln=1)
     checkbox("Higiene bucal adequada", dados.higiene_bucal)
@@ -140,7 +252,6 @@ def gerar_pdf(dados):
     checkbox(f"Classificação: {dados.classificacao_odonto}", True)
     pdf.ln(3)
 
-    # Plano Inicial
     pdf.set_font("Arial", 'B', 11)
     pdf.cell(0, 8, txt="PLANO INICIAL DE CUIDADO", ln=1)
     checkbox("Inserido no acompanhamento CAPS", dados.inserido_caps)
@@ -153,7 +264,6 @@ def gerar_pdf(dados):
     checkbox("Registro em prontuário realizado", dados.registro_prontuario)
     pdf.ln(10)
 
-    # Assinatura
     data_formatada = dados.data_criacao.strftime('%d de %B de %Y')
     pdf.cell(0, 10, txt=f"Angicos/RN, {data_formatada}.", ln=1, align='R')
     pdf.ln(15)
@@ -162,95 +272,153 @@ def gerar_pdf(dados):
     
     return pdf.output(dest='S').encode('latin-1')
 
-def main():
+# --- INTERFACE GRÁFICA ---
+
+def login_page():
+    st.title("CAPS Infantil - Login")
+    with st.form("login_form"):
+        username = st.text_input("Usuário")
+        password = st.text_input("Senha", type="password")
+        submit = st.form_submit_button("Entrar")
+        
+        if submit:
+            user = login_user(username, password)
+            if user:
+                st.session_state['logged_in'] = True
+                st.session_state['username'] = user.username
+                st.session_state['role'] = user.role
+                st.success("Login realizado com sucesso!")
+                st.rerun()
+            else:
+                st.error("Usuário ou senha incorretos")
+
+def main_app():
+    st.sidebar.title(f"Bem-vindo, {st.session_state['username']}")
+    if st.sidebar.button("Sair"):
+        st.session_state['logged_in'] = False
+        st.rerun()
+    
     st.title("CAPS INFANTIL - AVALIAÇÃO INICIAL")
-    st.subheader("CHECKLIST RÁPIDO")
-
-    tab1, tab2 = st.tabs(["Nova Avaliação", "Histórico de Avaliações"])
-
-    with tab1:
+    
+    tabs = ["Avaliação", "Histórico / Gerenciar"]
+    if st.session_state['role'] == 'admin':
+        tabs.append("Usuários")
+        
+    current_tab = st.tabs(tabs)
+    
+    # --- ABA AVALIAÇÃO ---
+    with current_tab[0]:
+        st.subheader("Ficha de Avaliação")
+        
+        # Recuperar dados se estiver editando
+        edit_data = st.session_state.get('edit_data', None)
+        edit_id = st.session_state.get('edit_id', None)
+        
+        if edit_data:
+            st.info(f"Editando avaliação de: {edit_data.get('paciente_nome', '')} (ID: {edit_id})")
+            if st.button("Cancelar Edição"):
+                st.session_state['edit_data'] = None
+                st.session_state['edit_id'] = None
+                st.rerun()
+        
         with st.form("checklist_form"):
-            # Identificação Básica (Implicito no cabeçalho/assinatura)
             col_data, col_prof = st.columns(2)
-            data_atual = col_data.date_input("Data", datetime.today())
-            profissional = col_prof.text_input("Profissional Responsável")
+            default_date = edit_data['data_criacao'] if edit_data else datetime.today()
+            data_atual = col_data.date_input("Data", default_date)
+            profissional = col_prof.text_input("Profissional Responsável", value=edit_data.get('profissional_responsavel', '') if edit_data else '')
             
             st.markdown("---")
             st.header("ACOLHIMENTO INICIAL")
             col1, col2 = st.columns(2)
-            paciente_nome = col1.text_input("Nome da Criança/Adolescente")
-            crianca_identificada = col2.checkbox("Criança/adolescente identificado", value=True if paciente_nome else False)
+            paciente_nome = col1.text_input("Nome da Criança/Adolescente", value=edit_data.get('paciente_nome', '') if edit_data else '')
+            
+            # Checkboxes defaults
+            def get_val(key):
+                return bool(edit_data.get(key)) if edit_data else False
+            
+            crianca_identificada = col2.checkbox("Criança/adolescente identificado", value=get_val('crianca_identificada'))
             
             col3, col4 = st.columns(2)
-            responsavel_nome = col3.text_input("Nome do Responsável Legal")
-            responsavel_presente = col4.checkbox("Responsável legal presente", value=True if responsavel_nome else False)
+            responsavel_nome = col3.text_input("Nome do Responsável Legal", value=edit_data.get('responsavel_nome', '') if edit_data else '')
+            responsavel_presente = col4.checkbox("Responsável legal presente", value=get_val('responsavel_presente'))
             
-            motivo_atendimento = st.text_area("Motivo do atendimento registrado")
-            encaminhamento_origem = st.text_input("Encaminhamento de origem identificado")
-            observacao_comportamento = st.text_area("Observação inicial do comportamento")
+            motivo_atendimento = st.text_area("Motivo do atendimento registrado", value=edit_data.get('motivo_atendimento', '') if edit_data else '')
+            encaminhamento_origem = st.text_input("Encaminhamento de origem identificado", value=edit_data.get('encaminhamento_origem', '') if edit_data else '')
+            observacao_comportamento = st.text_area("Observação inicial do comportamento", value=edit_data.get('observacao_comportamento', '') if edit_data else '')
             
             st.markdown("---")
             st.header("CADERNETA VACINAL")
             c1, c2, c3 = st.columns(3)
-            caderneta_apresentada = c1.checkbox("Caderneta apresentada")
-            vacinas_conferidas = c2.checkbox("Vacinas conferidas conforme idade")
-            esquema_completo = c3.checkbox("Esquema vacinal completo")
+            caderneta_apresentada = c1.checkbox("Caderneta apresentada", value=get_val('caderneta_apresentada'))
+            vacinas_conferidas = c2.checkbox("Vacinas conferidas conforme idade", value=get_val('vacinas_conferidas'))
+            esquema_completo = c3.checkbox("Esquema vacinal completo", value=get_val('esquema_completo'))
             
             c4, c5, c6 = st.columns(3)
-            vacinas_atraso = c4.checkbox("Vacinas em atraso")
-            orientacao_responsavel_vacina = c5.checkbox("Orientação ao responsável realizada")
-            encaminhamento_ubs_vacina = c6.checkbox("Encaminhamento à UBS (se necessário)")
+            vacinas_atraso = c4.checkbox("Vacinas em atraso", value=get_val('vacinas_atraso'))
+            orientacao_responsavel_vacina = c5.checkbox("Orientação ao responsável realizada", value=get_val('orientacao_responsavel_vacina'))
+            encaminhamento_ubs_vacina = c6.checkbox("Encaminhamento à UBS (se necessário)", value=get_val('encaminhamento_ubs_vacina'))
 
             st.markdown("---")
             st.header("AVALIAÇÃO NUTRICIONAL")
             nc1, nc2, nc3 = st.columns(3)
-            peso = nc1.number_input("Peso (kg)", min_value=0.0, format="%.2f")
-            altura = nc2.number_input("Altura (m)", min_value=0.0, format="%.2f")
+            peso = nc1.number_input("Peso (kg)", min_value=0.0, format="%.2f", value=edit_data.get('peso', 0.0) if edit_data else 0.0)
+            altura = nc2.number_input("Altura (m)", min_value=0.0, format="%.2f", value=edit_data.get('altura', 0.0) if edit_data else 0.0)
             
             imc = 0.0
             if altura > 0:
                 imc = peso / (altura * altura)
             nc3.metric("IMC Calculado", f"{imc:.2f}")
             
-            classificacao_nutricional = st.selectbox("Classificação nutricional definida", 
-                                                   ["Não avaliado", "Baixo peso", "Eutrofia (Peso adequado)", "Sobrepeso", "Obesidade"])
-            queixa_alimentar = st.text_input("Queixa alimentar identificada")
+            class_options = ["Não avaliado", "Baixo peso", "Eutrofia (Peso adequado)", "Sobrepeso", "Obesidade"]
+            default_class_idx = 0
+            if edit_data and edit_data.get('classificacao_nutricional') in class_options:
+                default_class_idx = class_options.index(edit_data.get('classificacao_nutricional'))
+            
+            classificacao_nutricional = st.selectbox("Classificação nutricional definida", class_options, index=default_class_idx)
+            queixa_alimentar = st.text_input("Queixa alimentar identificada", value=edit_data.get('queixa_alimentar', '') if edit_data else '')
             
             nc4, nc5 = st.columns(2)
-            orientacao_nutricional = nc4.checkbox("Orientação nutricional realizada")
-            encaminhamento_nutricao = nc5.checkbox("Encaminhamento realizado (Nutrição)")
+            orientacao_nutricional = nc4.checkbox("Orientação nutricional realizada", value=get_val('orientacao_nutricional'))
+            encaminhamento_nutricao = nc5.checkbox("Encaminhamento realizado (Nutrição)", value=get_val('encaminhamento_nutricao'))
 
             st.markdown("---")
             st.header("AVALIAÇÃO ODONTOLÓGICA")
             oc1, oc2, oc3 = st.columns(3)
-            higiene_bucal = oc1.checkbox("Higiene bucal adequada")
-            carie_visivel = oc2.checkbox("Presença de cárie visível")
-            dor_relatada = oc3.checkbox("Dor ou desconforto relatado")
+            higiene_bucal = oc1.checkbox("Higiene bucal adequada", value=get_val('higiene_bucal'))
+            carie_visivel = oc2.checkbox("Presença de cárie visível", value=get_val('carie_visivel'))
+            dor_relatada = oc3.checkbox("Dor ou desconforto relatado", value=get_val('dor_relatada'))
             
             oc4, oc5 = st.columns(2)
-            orientacao_higiene_bucal = oc4.checkbox("Orientação de higiene bucal realizada")
-            encaminhamento_odontologico = oc5.checkbox("Encaminhamento odontológico")
+            orientacao_higiene_bucal = oc4.checkbox("Orientação de higiene bucal realizada", value=get_val('orientacao_higiene_bucal'))
+            encaminhamento_odontologico = oc5.checkbox("Encaminhamento odontológico", value=get_val('encaminhamento_odontologico'))
             
-            classificacao_odonto = st.radio("Classificação Odontológica", ["Rotina", "Urgência"], horizontal=True)
+            odonto_options = ["Rotina", "Urgência"]
+            default_odonto_idx = 0
+            if edit_data and edit_data.get('classificacao_odonto') in odonto_options:
+                default_odonto_idx = odonto_options.index(edit_data.get('classificacao_odonto'))
+            
+            classificacao_odonto = st.radio("Classificação Odontológica", odonto_options, index=default_odonto_idx, horizontal=True)
 
             st.markdown("---")
             st.header("PLANO INICIAL DE CUIDADO")
             pc1, pc2, pc3 = st.columns(3)
-            inserido_caps = pc1.checkbox("Inserido no acompanhamento CAPS")
-            encaminhamento_ubs_plano = pc2.checkbox("Encaminhamento para UBS")
-            encaminhamento_nutricao_plano = pc3.checkbox("Encaminhamento para Nutrição")
+            inserido_caps = pc1.checkbox("Inserido no acompanhamento CAPS", value=get_val('inserido_caps'))
+            encaminhamento_ubs_plano = pc2.checkbox("Encaminhamento para UBS", value=get_val('encaminhamento_ubs_plano'))
+            encaminhamento_nutricao_plano = pc3.checkbox("Encaminhamento para Nutrição", value=get_val('encaminhamento_nutricao_plano'))
             
             pc4, pc5, pc6 = st.columns(3)
-            encaminhamento_odonto_plano = pc4.checkbox("Encaminhamento para Odontologia")
-            encaminhamento_assistencia_social = pc5.checkbox("Encaminhamento para Assistência Social")
-            registro_prontuario = pc6.checkbox("Registro em prontuário realizado")
+            encaminhamento_odonto_plano = pc4.checkbox("Encaminhamento para Odontologia", value=get_val('encaminhamento_odonto_plano'))
+            encaminhamento_assistencia_social = pc5.checkbox("Encaminhamento para Assistência Social", value=get_val('encaminhamento_assistencia_social'))
+            registro_prontuario = pc6.checkbox("Registro em prontuário realizado", value=get_val('registro_prontuario'))
             
-            proxima_avaliacao = st.date_input("Próxima avaliação agendada", value=None)
+            prox_val = edit_data['proxima_avaliacao'] if edit_data and edit_data.get('proxima_avaliacao') else None
+            proxima_avaliacao = st.date_input("Próxima avaliação agendada", value=prox_val)
 
             st.markdown("---")
             st.text(f"Angicos/RN, {data_atual.strftime('%d de %B de %Y')}")
             
-            submitted = st.form_submit_button("Salvar Avaliação")
+            btn_label = "Atualizar Avaliação" if edit_id else "Salvar Avaliação"
+            submitted = st.form_submit_button(btn_label)
             
             if submitted:
                 if not paciente_nome:
@@ -295,74 +463,147 @@ def main():
                         "cidade": "Angicos",
                         "estado": "RN"
                     }
-                    try:
-                        save_avaliacao(dados)
+                    if save_avaliacao(dados, avaliacao_id=edit_id):
                         st.success("Avaliação salva com sucesso!")
-                    except Exception as e:
-                        st.error(f"Erro ao salvar: {e}")
+                        if edit_id:
+                            st.session_state['edit_data'] = None
+                            st.session_state['edit_id'] = None
+                            st.rerun()
 
-    with tab2:
-        st.header("Histórico")
+    # --- ABA HISTÓRICO / GERENCIAR ---
+    with current_tab[1]:
+        st.header("Gerenciar Avaliações")
         session = Session()
         try:
-            # Carregar dados
             df = pd.read_sql(session.query(Avaliacao).statement, session.bind)
             
             if not df.empty:
                 # Filtros
-                filtro_nome = st.text_input("Filtrar por nome do paciente")
+                col_filt, col_export = st.columns([3, 1])
+                filtro_nome = col_filt.text_input("Filtrar por nome do paciente")
                 if filtro_nome:
                     df = df[df['paciente_nome'].str.contains(filtro_nome, case=False, na=False)]
                 
+                # Botão CSV
+                csv = df.to_csv(index=False).encode('utf-8')
+                col_export.download_button("Baixar CSV", csv, "avaliacoes.csv", "text/csv")
+                
                 st.dataframe(df)
                 
-                # Botão para exportar CSV
-                csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="Baixar dados em CSV",
-                    data=csv,
-                    file_name='avaliacoes_caps.csv',
-                    mime='text/csv',
-                )
-                
                 st.markdown("---")
-                st.subheader("Gerar Ficha Individual (PDF)")
+                st.subheader("Ações (Editar / Excluir / PDF)")
                 
-                # Seleção para PDF
-                nomes_disponiveis = df['paciente_nome'].unique()
-                paciente_selecionado = st.selectbox("Selecione o paciente para gerar ficha:", nomes_disponiveis)
+                # Seletor de Avaliação para Ação
+                # Criar lista de strings para seleção amigável
+                df['display_name'] = df['id'].astype(str) + " - " + df['paciente_nome'] + " (" + pd.to_datetime(df['data_criacao']).dt.strftime('%d/%m/%Y') + ")"
                 
-                if paciente_selecionado:
-                    # Pegar a última avaliação desse paciente ou listar datas
-                    avaliacoes_paciente = df[df['paciente_nome'] == paciente_selecionado]
-                    # Convertendo data para string para exibição
-                    avaliacoes_paciente['data_str'] = pd.to_datetime(avaliacoes_paciente['data_criacao']).dt.strftime('%d/%m/%Y')
+                selected_display = st.selectbox("Selecione uma avaliação para gerenciar:", df['display_name'].tolist())
+                
+                if selected_display:
+                    selected_id = int(selected_display.split(" - ")[0])
                     
-                    data_selecionada = st.selectbox("Selecione a data da avaliação:", avaliacoes_paciente['data_str'].unique())
+                    c_act1, c_act2, c_act3 = st.columns(3)
                     
-                    if st.button("Gerar PDF da Ficha"):
-                        # Buscar o objeto completo no banco
-                        avaliacao_obj = session.query(Avaliacao).filter(
-                            Avaliacao.paciente_nome == paciente_selecionado,
-                            Avaliacao.data_criacao == datetime.strptime(data_selecionada, '%d/%m/%Y').date()
-                        ).first()
-                        
+                    if c_act1.button("✏️ Editar Avaliação"):
+                        # Carregar dados para sessão e ir para aba de avaliação
+                        avaliacao_obj = session.query(Avaliacao).filter_by(id=selected_id).first()
+                        if avaliacao_obj:
+                            # Converter objeto SQLAlchemy para dict
+                            data_dict = {c.name: getattr(avaliacao_obj, c.name) for c in avaliacao_obj.__table__.columns}
+                            st.session_state['edit_data'] = data_dict
+                            st.session_state['edit_id'] = selected_id
+                            st.rerun()
+                            
+                    if c_act2.button("🗑️ Excluir Avaliação", type="primary"):
+                        if delete_avaliacao(selected_id):
+                            st.success("Avaliação excluída!")
+                            st.rerun()
+                            
+                    if c_act3.button("📄 Gerar PDF"):
+                        avaliacao_obj = session.query(Avaliacao).filter_by(id=selected_id).first()
                         if avaliacao_obj:
                             pdf_bytes = gerar_pdf(avaliacao_obj)
                             st.download_button(
-                                label="⬇️ Baixar Ficha em PDF",
+                                label="⬇️ Baixar PDF",
                                 data=pdf_bytes,
-                                file_name=f"ficha_{paciente_selecionado}_{data_selecionada.replace('/','-')}.pdf",
+                                file_name=f"ficha_{selected_id}.pdf",
                                 mime='application/pdf'
                             )
-                        else:
-                            st.error("Avaliação não encontrada.")
             else:
-                st.info("Nenhuma avaliação registrada ainda.")
+                st.info("Nenhuma avaliação registrada.")
         except Exception as e:
-            st.error(f"Erro ao carregar histórico: {e}")
+            st.error(f"Erro: {e}")
         finally:
             session.close()
+
+    # --- ABA USUÁRIOS (ADMIN) ---
+    if st.session_state['role'] == 'admin':
+        with current_tab[2]:
+            st.header("Gerenciar Usuários")
+            
+            # Criar Novo Usuário
+            with st.expander("Cadastrar Novo Usuário"):
+                with st.form("new_user"):
+                    new_user = st.text_input("Novo Usuário")
+                    new_pass = st.text_input("Nova Senha", type="password")
+                    new_role = st.selectbox("Função", ["user", "admin"])
+                    if st.form_submit_button("Criar"):
+                        success, msg = create_user(new_user, new_pass, new_role)
+                        if success:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+            
+            # Listar Usuários
+            st.subheader("Lista de Usuários")
+            session = Session()
+            users = session.query(User).all()
+            session.close()
+            
+            user_data = [{"ID": u.id, "Usuário": u.username, "Função": u.role} for u in users]
+            st.dataframe(pd.DataFrame(user_data))
+
+            # Atualizar Usuário
+            st.subheader("Atualizar Usuário")
+            user_to_update_name = st.selectbox("Selecione para atualizar:", [u['Usuário'] for u in user_data])
+            if user_to_update_name:
+                u_to_up = next(u for u in user_data if u['Usuário'] == user_to_update_name)
+                with st.form("update_user_form"):
+                    st.write(f"Editando: {u_to_up['Usuário']}")
+                    new_username_val = st.text_input("Novo Nome de Usuário", value=u_to_up['Usuário'])
+                    new_role_val = st.selectbox("Nova Função", ["user", "admin"], index=0 if u_to_up['Função'] == "user" else 1)
+                    new_pass_val = st.text_input("Nova Senha (deixe em branco para não alterar)", type="password")
+                    
+                    if st.form_submit_button("Atualizar"):
+                        # Só passa a senha se não estiver vazia
+                        pass_arg = new_pass_val if new_pass_val else None
+                        username_arg = new_username_val if new_username_val != u_to_up['Usuário'] else None
+                        
+                        success, msg = update_user(u_to_up['ID'], new_password=pass_arg, new_role=new_role_val, new_username=username_arg)
+                        if success:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+            
+            # Excluir Usuário
+            st.subheader("Excluir Usuário")
+            user_to_del = st.selectbox("Selecione para excluir:", [u['Usuário'] for u in user_data if u['Usuário'] != 'admin'])
+            if st.button("Excluir Usuário Selecionado"):
+                u_id = next(u['ID'] for u in user_data if u['Usuário'] == user_to_del)
+                if delete_user(u_id):
+                    st.success("Usuário excluído!")
+                    st.rerun()
+
+def main():
+    if 'logged_in' not in st.session_state:
+        st.session_state['logged_in'] = False
+        
+    if not st.session_state['logged_in']:
+        login_page()
+    else:
+        main_app()
 
 if __name__ == "__main__":
     main()
