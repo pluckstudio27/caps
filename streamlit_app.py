@@ -3,6 +3,8 @@ import pandas as pd
 from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, Date, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
+from fpdf import FPDF
+import io
 
 # Configuração da Página
 st.set_page_config(page_title="CAPS Infantil - Checklist", layout="wide")
@@ -65,10 +67,15 @@ class Avaliacao(Base):
     proxima_avaliacao = Column(Date)
     registro_prontuario = Column(Boolean)
 
-from fpdf import FPDF
-import io
+# Criar tabelas se não existirem
+Base.metadata.create_all(engine)
 
-# ... (código existente até save_avaliacao)
+def save_avaliacao(data):
+    session = Session()
+    nova_avaliacao = Avaliacao(**data)
+    session.add(nova_avaliacao)
+    session.commit()
+    session.close()
 
 def gerar_pdf(dados):
     pdf = FPDF()
